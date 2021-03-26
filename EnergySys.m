@@ -78,7 +78,6 @@ classdef EnergySys
             %   appears to be infrequent in practical AY simulations.
             
             minB = (1/10); % Minimum battery reserve to run power2gas
-            
             minG = obj.p2gCap * ctrl; % Minimum dynamic range of p2g
                                       % as dictated by ctrl
             if ((ctrl > 0) && (obj.deltaG > 0)) || ... % ... or ...
@@ -94,17 +93,7 @@ classdef EnergySys
             else
                 p2g = 0;
             end
-%             if ctrl > 0
-%                 if obj.dailykWh > (obj.dailyCap * minB)
-%                     p2g = min(obj.dailykWh - (obj.dailyCap * minB), ...
-%                         obj.p2gCap * ctrl);
-%                 else
-%                    p2g = 0;
-%                 end
-%             else
-%                 p2g = 0;
-%                 % Simply no gas storage if no external command
-%             end
+            
             obj.deltaG = max(p2g, 0);
             remainder = powerInput - p2g;
             obj.deltaS = p2g;
