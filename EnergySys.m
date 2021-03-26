@@ -12,13 +12,14 @@ classdef EnergySys
         p2gEta          % efficiency to gas energy content, not round trip
         g2pEta          % efficiency from gas to electricity
         
-        dailykWh = 0    % Initial short-term storage e.g. battery charge
-        seasonalkWh = 0 % Initial long-term storage e.g. CNG
+        dailykWh = 0    % initial short-term storage e.g. battery charge
+        seasonalkWh = 0 % initial long-term storage e.g. CNG
         wastekWh = 0    % Curtailment
         
         deltaD = 0      % change in daily storage       % used during
         deltaS = 0      % change in seasonal storage    % simulation
         deltaC = 0      % change in curtailment         %
+        deltaG = 0      % gas production                %
 
     end
     
@@ -26,7 +27,8 @@ classdef EnergySys
         % These properties are not inherent to the class but depend on the
         % locality and time resolution of the dataset. *Change as needed
         summer = 3:10;  % months for prioritizing PtG       *
-        perHr = 4;      % Time samples per hour             *
+        perHr = 4;      % time samples per hour             *
+        dynRange = 0.4; % lower bound of dynamic range for p2g
     end
 
     methods
@@ -52,14 +54,14 @@ classdef EnergySys
         end
         
         function attrs = getDeltas(obj)
-            attrs = [obj.deltaD obj.deltaS obj.deltaC];
+            attrs = [obj.deltaD obj.deltaS obj.deltaC obj.deltaG];
         end
         
         function [obj, remainder] = power2gas(obj, powerInput, ctrl)
             %POWER2GAS Increments long term storage according to args
             %
             %   powerInput      net power available at the time step
-            %   ctrl            signal to run p2g from battery or not
+            %   ctrl            signal to run p2g
             %   
             %   remainder       excess or deficit after allocating energy 
             %                   this function does not directly withdraw
@@ -69,25 +71,41 @@ classdef EnergySys
             %   ctrl will be passed in if external signal determines there
             %   is a net surplus in the forecast. Function will not add
             %   load without surplus power input or available battery, the
-            %   deficit will pass through to gas2power. ctrl is a range of
-            %   values from 0 to 1
+            %   deficit will pass through to gas2power. Value from 0 to 1
             %
             %   A more accurate model will use longer term forecasting to
             %   limit intermittent start and stop cycles, however this
             %   appears to be infrequent in practical AY simulations.
             
             minB = (1/10); % Minimum battery reserve to run power2gas
-            if ctrl > 0
-                if obj.dailykWh > (obj.dailyCap * minB)
-                    p2g = min(obj.dailykWh - (obj.dailyCap * minB), ...
-                        obj.p2gCap);
-                else
-                   p2g = 0;
-                end
+            
+            minG = obj.p2gCap * ctrl; % Minimum dynamic range of p2g
+                                      % as dictated by ctrl
+            if ((ctrl > 0) && (obj.deltaG > 0)) || ... % ... or ...
+                (ctrl == 1) && (obj.deltaG == 0) && ...
+                    (obj.dailykWh > (obj.dailyCap * minB))
+                % Two seperate conditions to run
+                % First case: continue running if already running and no
+                %   signal to stop. Does not restart in last month
+                % Second case: Start running if signal says run full power
+                %   and battery has enough reserve
+               p2g =  min(max(obj.dailykWh - (obj.dailyCap * minB), ...
+                   minG), minG); 
             else
                 p2g = 0;
-                % Simply no gas storage if no external command
             end
+%             if ctrl > 0
+%                 if obj.dailykWh > (obj.dailyCap * minB)
+%                     p2g = min(obj.dailykWh - (obj.dailyCap * minB), ...
+%                         obj.p2gCap * ctrl);
+%                 else
+%                    p2g = 0;
+%                 end
+%             else
+%                 p2g = 0;
+%                 % Simply no gas storage if no external command
+%             end
+            obj.deltaG = max(p2g, 0);
             remainder = powerInput - p2g;
             obj.deltaS = p2g;
             obj.seasonalkWh = obj.seasonalkWh + p2g * obj.p2gEta;
@@ -122,7 +140,7 @@ classdef EnergySys
             %   fcast = Matrix, row vectors are the length of the forecast
             %
             if obj.p2gCap > 0
-                stepsAhead = floor(obj.perHr * 24 * 1);
+                stepsAhead = floor(obj.perHr * 24 * 3);
                 gen = [inputs(:, 1); zeros(stepsAhead, 1)];
                 load = [inputs(:, 2); zeros(stepsAhead, 1)];
                 fcast = zeros(size(inputs, 1), stepsAhead);
@@ -151,6 +169,7 @@ classdef EnergySys
             %   remaining e-load is withdrawn from gas at rate g2pEta
             %   heat load always comes from gas storage
             %
+            %
             gen = inputs(1); eload = inputs(2);
             heatload = inputs(3); month = inputs(4);
             
@@ -158,9 +177,11 @@ classdef EnergySys
             if any(month == obj.summer)
                 fullp2g = (... % This generates a cumulitive sum of load
                     1:length(fcast(:))) * obj.p2gCap;
+                net_bt = fcast + obj.dailykWh;
                 seasonCtrl = max( ...
-                    all((fcast + obj.dailykWh - fullp2g ) > 0), ...
-                    all((fcast + obj.dailykWh - fullp2g*.25) > 0) * .25);
+                    all((net_bt - fullp2g ) > 0) && ...
+                    (month ~= obj.summer(end)), ... % no restarts in Oct.
+                    all((net_bt - fullp2g*obj.dynRange) > 0) * obj.dynRange);
             else
                 seasonCtrl = 0;
             end
@@ -178,14 +199,14 @@ classdef EnergySys
                 obj.wastekWh = obj.wastekWh + rem;
                 obj.deltaC = rem;
             end
-             % Remaining additions to this incarnation
+             % Heat taken entirely from gas storage
             obj.seasonalkWh = obj.seasonalkWh - heatload;
         end
         
         function [kWhSum, kWhDelta] = run(obj, inputData)
             %RUN Executes simulation of power system
             %
-            %   inputData = [gen, e-load, month indicator, heat-load]
+            %   inputData = [gen, e-load, heat-load, month indicator]
             %
             %   kWhSum   =  [battery storage, seasonal storage]
             %   kWhDelta ~~  diff([battery, seasonal, curtailment])
